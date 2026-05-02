@@ -7,8 +7,11 @@
 // --help
 //
 
+use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
+
+mod audio_transcode;
 
 #[derive(Debug, Clone, ValueEnum)]
 enum WhisperModel {
@@ -46,25 +49,30 @@ struct Args {
     whisper_model: WhisperModel,
 }
 
-fn main() {
+fn main() -> Result<()> {
     // parser args
     let args = Args::parse();
 
-    match args.whisper_model {
-        WhisperModel::Tiny => {
-            todo!()
-        }
-        WhisperModel::Base => {
-            todo!()
-        }
-        WhisperModel::Small => {
-            todo!()
-        }
-        WhisperModel::Medium => {
-            todo!()
-        }
-        WhisperModel::Large => {
-            todo!()
-        }
-    }
+    // extract wav from audio stream
+    let wav_path = args.input_file.with_extension("wav");
+    audio_transcode::extract_wav(&args.input_file, &wav_path)?;
+
+    // match args.whisper_model {
+    //     WhisperModel::Tiny => {
+    //         todo!()
+    //     }
+    //     WhisperModel::Base => {
+    //         todo!()
+    //     }
+    //     WhisperModel::Small => {
+    //         todo!()
+    //     }
+    //     WhisperModel::Medium => {
+    //         todo!()
+    //     }
+    //     WhisperModel::Large => {
+    //         todo!()
+    //     }
+    // }
+    Ok(())
 }
