@@ -67,7 +67,7 @@ fn filter(
     filter.output("in", 0)?.input("out", 0)?.parse(&fmt_spec)?;
     filter.validate()?;
 
-    println!("{}", filter.dump());
+    // println!("{}", filter.dump());
 
     if let Some(codec) = encoder.codec() {
         if !codec
@@ -123,16 +123,13 @@ fn transcoder<P: AsRef<Path> + ?Sized>(
     let context = ffmpeg::codec::context::Context::from_parameters(output.parameters())?;
     let mut encoder = context.encoder().audio()?;
 
-    let channel_layout = codec
-        .channel_layouts()
-        .map(|cls| cls.best(decoder.channel_layout().channels()))
-        .unwrap_or(ffmpeg::channel_layout::ChannelLayout::STEREO);
+    let channel_layout = ffmpeg::channel_layout::ChannelLayout::MONO;
 
     if global {
         encoder.set_flags(ffmpeg::codec::flag::Flags::GLOBAL_HEADER);
     }
 
-    encoder.set_rate(decoder.rate() as i32);
+    encoder.set_rate(16_000);
     encoder.set_channel_layout(channel_layout);
 
     // 优先选用 s16（16位有符号整数 PCM），这是 WAV 最标准的无损格式
@@ -154,8 +151,8 @@ fn transcoder<P: AsRef<Path> + ?Sized>(
 
     encoder.set_bit_rate(decoder.bit_rate());
     encoder.set_max_bit_rate(decoder.max_bit_rate());
-    encoder.set_time_base((1, decoder.rate() as i32));
-    output.set_time_base((1, decoder.rate() as i32));
+    encoder.set_time_base((1, 16_000));
+    output.set_time_base((1, 16_000));
 
     let encoder = encoder.open_as(codec)?;
     output.set_parameters(&encoder);

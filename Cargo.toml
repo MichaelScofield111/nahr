@@ -3,9 +3,12 @@ name = "nahr"
 version = "0.1.0"
 edition = "2024"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
 ffmpeg-next = "8.1.0"
+hound = "3.5.1"
+rust-bert = { version = "0.23.0", features = ["download-libtorch"] }
+whisper-rs = "0.16.0"
+console = { version = "0.16.3", features = ["std"] }
