@@ -30,6 +30,20 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: install nextest
         uses: taiki-e/install-action@nextest
+      - name: Install system dependencies (FFmpeg + libass)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            ffmpeg \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libavfilter-dev \
+            libswresample-dev \
+            libswscale-dev \
+            libavdevice-dev \
+            libass-dev
       - uses: Swatinem/rust-cache@v2
       - name: Check code format
         run: cargo fmt -- --check
