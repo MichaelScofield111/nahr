@@ -2,20 +2,9 @@ use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub fn burn_subtitles(input_video: &PathBuf, subtitle_srt: &PathBuf) -> Result<()> {
+pub fn burn_subtitles(input_video: &Path, subtitle_srt: &Path) -> Result<PathBuf> {
     let subtitle_filter = format!("subtitles={}", escape_for_subtitles_filter(subtitle_srt));
-
-    let stem = input_video
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| {
-            anyhow!(
-                "Failed to derive output filename from {}",
-                input_video.display()
-            )
-        })?;
-
-    let output_video = input_video.with_file_name(format!("{stem}_cn_bake.mp4"));
+    let output_video = output_video_path(input_video)?;
 
     let status = Command::new("ffmpeg")
         .arg("-y")
@@ -36,7 +25,21 @@ pub fn burn_subtitles(input_video: &PathBuf, subtitle_srt: &PathBuf) -> Result<(
         ));
     }
 
-    Ok(())
+    Ok(output_video)
+}
+
+pub fn output_video_path(input_video: &Path) -> Result<PathBuf> {
+    let stem = input_video
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| {
+            anyhow!(
+                "Failed to derive output filename from {}",
+                input_video.display()
+            )
+        })?;
+
+    Ok(input_video.with_file_name(format!("{stem}_cn_bake.mp4")))
 }
 
 fn escape_for_subtitles_filter(path: &Path) -> String {
@@ -47,4 +50,16 @@ fn escape_for_subtitles_filter(path: &Path) -> String {
         .replace(',', "\\,")
         .replace('[', "\\[")
         .replace(']', "\\]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_video_path;
+    use std::path::Path;
+
+    #[test]
+    fn output_video_name_uses_expected_suffix() {
+        let output = output_video_path(Path::new("/tmp/demo.mp4")).unwrap();
+        assert_eq!(output, Path::new("/tmp/demo_cn_bake.mp4"));
+    }
 }

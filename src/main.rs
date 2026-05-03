@@ -20,11 +20,14 @@ struct Args {
     #[arg(short, long, value_name = "FILE")]
     input_file: PathBuf,
 
-    #[arg(long, value_name = "default-Language", default_value = "en")]
+    #[arg(long, value_name = "LANG", default_value = "en")]
     language: String,
 
     #[arg(long, value_name = "FILE")]
     whisper_model_path: PathBuf,
+
+    #[arg(long, default_value_t = false)]
+    keep_temp: bool,
 }
 
 fn main() -> Result<()> {

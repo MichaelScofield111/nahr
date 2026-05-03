@@ -3,6 +3,7 @@ use hound::WavReader;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::thread;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 pub fn wav_to_srt<W: AsRef<Path>, M: AsRef<Path>>(
@@ -23,8 +24,11 @@ pub fn wav_to_srt<W: AsRef<Path>, M: AsRef<Path>>(
     // Greedy 通常更快；BeamSearch 更慢但有时更准
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
-    // cpu to set
-    params.set_n_threads(4);
+    let n_threads = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .min(i32::MAX as usize) as i32;
+    params.set_n_threads(n_threads);
 
     // to set translate en srt
     params.set_translate(false);
@@ -83,20 +87,14 @@ pub fn wav_to_srt<W: AsRef<Path>, M: AsRef<Path>>(
     let result_srt_path = wav_path.as_ref().with_extension(format!("{language}.srt"));
     let mut file = File::create(&result_srt_path)?;
 
-    for (idx, segment) in state.as_iter().enumerate() {
-        let start = cs_to_srt_timestamp(segment.start_timestamp());
-        let end = cs_to_srt_timestamp(segment.end_timestamp());
-        let text = segment.to_string().trim().to_string();
-
-        if text.is_empty() {
-            continue;
-        }
-
-        writeln!(file, "{}", idx + 1)?;
-        writeln!(file, "{} --> {}", start, end)?;
-        writeln!(file, "{}", text)?;
-        writeln!(file)?;
-    }
+    let entries = state.as_iter().map(|segment| {
+        (
+            segment.start_timestamp(),
+            segment.end_timestamp(),
+            segment.to_string(),
+        )
+    });
+    write_srt_entries(&mut file, entries)?;
 
     Ok(result_srt_path)
 }
@@ -108,4 +106,61 @@ fn cs_to_srt_timestamp(cs: i64) -> String {
     let seconds = (total_ms % 60_000) / 1_000;
     let millis = total_ms % 1_000;
     format!("{:02}:{:02}:{:02},{:03}", hours, minutes, seconds, millis)
+}
+
+fn write_srt_entries<W, I>(writer: &mut W, entries: I) -> Result<()>
+where
+    W: Write,
+    I: IntoIterator<Item = (i64, i64, String)>,
+{
+    let mut sequence = 1;
+
+    for (start_cs, end_cs, text) in entries {
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+
+        writeln!(writer, "{sequence}")?;
+        writeln!(
+            writer,
+            "{} --> {}",
+            cs_to_srt_timestamp(start_cs),
+            cs_to_srt_timestamp(end_cs)
+        )?;
+        writeln!(writer, "{text}")?;
+        writeln!(writer)?;
+        sequence += 1;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cs_to_srt_timestamp, write_srt_entries};
+
+    #[test]
+    fn timestamp_format_matches_srt_spec() {
+        assert_eq!(cs_to_srt_timestamp(372_345), "01:02:03,450");
+    }
+
+    #[test]
+    fn srt_sequence_remains_contiguous_when_empty_segments_are_skipped() {
+        let mut output = Vec::new();
+        write_srt_entries(
+            &mut output,
+            vec![
+                (0, 100, "Hello".to_string()),
+                (100, 200, "   ".to_string()),
+                (200, 300, "World".to_string()),
+            ],
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8(output).unwrap();
+        assert!(rendered.contains("1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"));
+        assert!(rendered.contains("2\n00:00:02,000 --> 00:00:03,000\nWorld\n\n"));
+        assert!(!rendered.contains("3\n"));
+    }
 }

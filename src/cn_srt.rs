@@ -1,4 +1,4 @@
-use anyhow::{Ok, Result, anyhow};
+use anyhow::{Result, anyhow};
 use rust_bert::pipelines::{
     common::ModelType,
     translation::{Language, TranslationModelBuilder},
@@ -23,15 +23,28 @@ pub fn gen_cnsrt<P: AsRef<Path>>(en_srt_path: P, language: &str) -> Result<PathB
     let cn_srt_path = en_srt_path.as_ref().with_extension("cn.srt");
     let reader = BufReader::new(File::open(en_srt_path)?);
     let mut writer = BufWriter::new(File::create(&cn_srt_path)?);
+    let mut lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
 
-    for line in reader.lines() {
-        let line = line?;
-        if should_translate_line(&line) {
-            let translated = model.translate(&[line.as_str()], None, Language::ChineseMandarin)?;
-            writeln!(writer, "{}", translated.first().map_or("", |s| s.as_str()))?;
-        } else {
-            writeln!(writer, "{line}")?;
+    let translatable_indices: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| should_translate_line(line).then_some(index))
+        .collect();
+
+    if !translatable_indices.is_empty() {
+        let texts: Vec<&str> = translatable_indices
+            .iter()
+            .map(|&index| lines[index].as_str())
+            .collect();
+        let translated = model.translate(&texts, None, Language::ChineseMandarin)?;
+
+        for (index, translated_line) in translatable_indices.into_iter().zip(translated) {
+            lines[index] = translated_line;
         }
+    }
+
+    for line in lines {
+        writeln!(writer, "{line}")?;
     }
 
     writer.flush()?;
@@ -41,4 +54,17 @@ pub fn gen_cnsrt<P: AsRef<Path>>(en_srt_path: P, language: &str) -> Result<PathB
 fn should_translate_line(line: &str) -> bool {
     let trimmed = line.trim();
     !trimmed.is_empty() && !trimmed.contains("-->") && !trimmed.chars().all(|c| c.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_translate_line;
+
+    #[test]
+    fn only_subtitle_content_lines_are_translated() {
+        assert!(!should_translate_line(""));
+        assert!(!should_translate_line("12"));
+        assert!(!should_translate_line("00:00:01,000 --> 00:00:02,000"));
+        assert!(should_translate_line("Hello, world!"));
+    }
 }

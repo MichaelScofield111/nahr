@@ -18,19 +18,19 @@ pub fn extract_wav<P: AsRef<Path> + ?Sized>(input: &P, output: &P) -> Result<(),
     for (stream, mut packet) in ictx.packets() {
         if stream.index() == transcoder.stream {
             packet.rescale_ts(stream.time_base(), transcoder.in_time_base);
-            transcoder.send_packet_to_decoder(&packet);
-            transcoder.receive_and_process_decoded_frames(&mut octx);
+            transcoder.send_packet_to_decoder(&packet)?;
+            transcoder.receive_and_process_decoded_frames(&mut octx)?;
         }
     }
 
-    transcoder.send_eof_to_decoder();
-    transcoder.receive_and_process_decoded_frames(&mut octx);
+    transcoder.send_eof_to_decoder()?;
+    transcoder.receive_and_process_decoded_frames(&mut octx)?;
 
-    transcoder.flush_filter();
-    transcoder.get_and_process_filtered_frames(&mut octx);
+    transcoder.flush_filter()?;
+    transcoder.get_and_process_filtered_frames(&mut octx)?;
 
-    transcoder.send_eof_to_encoder();
-    transcoder.receive_and_process_encoded_packets(&mut octx);
+    transcoder.send_eof_to_encoder()?;
+    transcoder.receive_and_process_encoded_packets(&mut octx)?;
 
     octx.write_trailer()?;
 
@@ -51,8 +51,11 @@ fn filter(
         decoder.format().name(),
         decoder.channel_layout().bits()
     );
-    filter.add(&filter::find("abuffer").unwrap(), "in", &in_args)?;
-    filter.add(&filter::find("abuffersink").unwrap(), "out", "")?;
+    let abuffer = filter::find("abuffer").ok_or(ffmpeg::Error::InvalidData)?;
+    let abuffersink = filter::find("abuffersink").ok_or(ffmpeg::Error::InvalidData)?;
+
+    filter.add(&abuffer, "in", &in_args)?;
+    filter.add(&abuffersink, "out", "")?;
 
     // 把 aformat 插入 spec，强制转换成 encoder 需要的格式
     // 原来 spec = "anull"，现在变成 "anull,aformat=sample_fmts=s16:channel_layouts=stereo:sample_rates=44100"
@@ -69,17 +72,16 @@ fn filter(
 
     // println!("{}", filter.dump());
 
-    if let Some(codec) = encoder.codec() {
-        if !codec
+    if let Some(codec) = encoder.codec()
+        && !codec
             .capabilities()
             .contains(ffmpeg::codec::capabilities::Capabilities::VARIABLE_FRAME_SIZE)
-        {
-            filter
-                .get("out")
-                .unwrap()
-                .sink()
-                .set_frame_size(encoder.frame_size());
-        }
+    {
+        filter
+            .get("out")
+            .ok_or(ffmpeg::Error::InvalidData)?
+            .sink()
+            .set_frame_size(encoder.frame_size());
     }
 
     Ok(filter)
@@ -103,13 +105,13 @@ fn transcoder<P: AsRef<Path> + ?Sized>(
     let input = ictx
         .streams()
         .best(media::Type::Audio)
-        .expect("could not find best audio stream");
+        .ok_or(ffmpeg::Error::StreamNotFound)?;
 
     let context = ffmpeg::codec::context::Context::from_parameters(input.parameters())?;
     let mut decoder = context.decoder().audio()?;
 
     let codec = ffmpeg::encoder::find(octx.format().codec(path, media::Type::Audio))
-        .expect("failed to find encoder")
+        .ok_or(ffmpeg::Error::EncoderNotFound)?
         .audio()?;
 
     let global = octx
@@ -136,16 +138,16 @@ fn transcoder<P: AsRef<Path> + ?Sized>(
     // 找不到则 fallback 到编解码器支持的第一个格式
     let preferred_fmt = codec
         .formats()
-        .expect("unknown supported formats")
+        .ok_or(ffmpeg::Error::InvalidData)?
         .find(|f| *f == ffmpeg::format::Sample::I16(SampleType::Packed));
 
     let fmt = match preferred_fmt {
         Some(f) => f,
         None => codec
             .formats()
-            .expect("unknown supported formats")
+            .ok_or(ffmpeg::Error::InvalidData)?
             .next()
-            .unwrap(),
+            .ok_or(ffmpeg::Error::InvalidData)?,
     };
     encoder.set_format(fmt);
 
@@ -173,61 +175,84 @@ fn transcoder<P: AsRef<Path> + ?Sized>(
 }
 
 impl Transcoder {
-    fn send_frame_to_encoder(&mut self, frame: &ffmpeg::Frame) {
-        self.encoder.send_frame(frame).unwrap();
+    fn send_frame_to_encoder(&mut self, frame: &ffmpeg::Frame) -> Result<(), ffmpeg::Error> {
+        self.encoder.send_frame(frame)
     }
 
-    fn send_eof_to_encoder(&mut self) {
-        self.encoder.send_eof().unwrap();
+    fn send_eof_to_encoder(&mut self) -> Result<(), ffmpeg::Error> {
+        self.encoder.send_eof()
     }
 
-    fn receive_and_process_encoded_packets(&mut self, octx: &mut format::context::Output) {
+    fn receive_and_process_encoded_packets(
+        &mut self,
+        octx: &mut format::context::Output,
+    ) -> Result<(), ffmpeg::Error> {
         let mut encoded = ffmpeg::Packet::empty();
         while self.encoder.receive_packet(&mut encoded).is_ok() {
             encoded.set_stream(0);
             encoded.rescale_ts(self.in_time_base, self.out_time_base);
-            encoded.write_interleaved(octx).unwrap();
+            encoded.write_interleaved(octx)?;
         }
+
+        Ok(())
     }
 
-    fn add_frame_to_filter(&mut self, frame: &ffmpeg::Frame) {
-        self.filter.get("in").unwrap().source().add(frame).unwrap();
+    fn add_frame_to_filter(&mut self, frame: &ffmpeg::Frame) -> Result<(), ffmpeg::Error> {
+        self.filter
+            .get("in")
+            .ok_or(ffmpeg::Error::InvalidData)?
+            .source()
+            .add(frame)
     }
 
-    fn flush_filter(&mut self) {
-        self.filter.get("in").unwrap().source().flush().unwrap();
+    fn flush_filter(&mut self) -> Result<(), ffmpeg::Error> {
+        self.filter
+            .get("in")
+            .ok_or(ffmpeg::Error::InvalidData)?
+            .source()
+            .flush()
     }
 
-    fn get_and_process_filtered_frames(&mut self, octx: &mut format::context::Output) {
+    fn get_and_process_filtered_frames(
+        &mut self,
+        octx: &mut format::context::Output,
+    ) -> Result<(), ffmpeg::Error> {
         let mut filtered = frame::Audio::empty();
         while self
             .filter
             .get("out")
-            .unwrap()
+            .ok_or(ffmpeg::Error::InvalidData)?
             .sink()
             .frame(&mut filtered)
             .is_ok()
         {
-            self.send_frame_to_encoder(&filtered);
-            self.receive_and_process_encoded_packets(octx);
+            self.send_frame_to_encoder(&filtered)?;
+            self.receive_and_process_encoded_packets(octx)?;
         }
+
+        Ok(())
     }
 
-    fn send_packet_to_decoder(&mut self, packet: &ffmpeg::Packet) {
-        self.decoder.send_packet(packet).unwrap();
+    fn send_packet_to_decoder(&mut self, packet: &ffmpeg::Packet) -> Result<(), ffmpeg::Error> {
+        self.decoder.send_packet(packet)
     }
 
-    fn send_eof_to_decoder(&mut self) {
-        self.decoder.send_eof().unwrap();
+    fn send_eof_to_decoder(&mut self) -> Result<(), ffmpeg::Error> {
+        self.decoder.send_eof()
     }
 
-    fn receive_and_process_decoded_frames(&mut self, octx: &mut format::context::Output) {
+    fn receive_and_process_decoded_frames(
+        &mut self,
+        octx: &mut format::context::Output,
+    ) -> Result<(), ffmpeg::Error> {
         let mut decoded = frame::Audio::empty();
         while self.decoder.receive_frame(&mut decoded).is_ok() {
             let timestamp = decoded.timestamp();
             decoded.set_pts(timestamp);
-            self.add_frame_to_filter(&decoded);
-            self.get_and_process_filtered_frames(octx);
+            self.add_frame_to_filter(&decoded)?;
+            self.get_and_process_filtered_frames(octx)?;
         }
+
+        Ok(())
     }
 }
