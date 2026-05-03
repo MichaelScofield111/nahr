@@ -51,7 +51,7 @@ If the `subtitles` filter is missing, your FFmpeg build likely does not include 
 ### 1. Clone and enter project
 
 ```bash
-git clone
+git clone https://github.com/MichaelScofield111/nahr.git
 cd nahr
 ```
 
