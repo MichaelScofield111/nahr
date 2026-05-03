@@ -23,11 +23,7 @@ struct Args {
     #[arg(long, value_name = "LANG", default_value = "en")]
     language: String,
 
-    #[arg(
-        long,
-        value_name = "FILE",
-        default_value = "models/ggml-base.bin"
-    )]
+    #[arg(long, value_name = "FILE", default_value = "models/ggml-base.bin")]
     whisper_model_path: PathBuf,
 
     #[arg(long, default_value_t = false)]

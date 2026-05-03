@@ -1,8 +1,4 @@
-use crate::{
-    Args,
-    bake::burn_subtitles,
-    cn_srt, srt, wav,
-};
+use crate::{Args, bake::burn_subtitles, cn_srt, srt, wav};
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,22 +9,33 @@ pub fn subtitle_pipeline(args: &Args) -> Result<()> {
     wav::extract_wav(&args.input_file, &temp_paths.wav_path)
         .with_context(|| format!("failed to extract wav from {}", args.input_file.display()))?;
 
-    let source_srt_path =
-        srt::wav_to_srt(&temp_paths.wav_path, &args.whisper_model_path, &args.language)
-            .with_context(|| {
-                format!(
-                    "failed to generate source subtitles from {}",
-                    temp_paths.wav_path.display()
-                )
-            })?;
+    let source_srt_path = srt::wav_to_srt(
+        &temp_paths.wav_path,
+        &args.whisper_model_path,
+        &args.language,
+    )
+    .with_context(|| {
+        format!(
+            "failed to generate source subtitles from {}",
+            temp_paths.wav_path.display()
+        )
+    })?;
     debug_assert_eq!(source_srt_path, temp_paths.source_srt_path);
 
-    let cn_srt_path = cn_srt::gen_cnsrt(&source_srt_path, &args.language)
-        .with_context(|| format!("failed to translate subtitles from {}", source_srt_path.display()))?;
+    let cn_srt_path = cn_srt::gen_cnsrt(&source_srt_path, &args.language).with_context(|| {
+        format!(
+            "failed to translate subtitles from {}",
+            source_srt_path.display()
+        )
+    })?;
     debug_assert_eq!(cn_srt_path, temp_paths.cn_srt_path);
 
-    burn_subtitles(&args.input_file, &cn_srt_path)
-        .with_context(|| format!("failed to burn subtitles into {}", args.input_file.display()))?;
+    burn_subtitles(&args.input_file, &cn_srt_path).with_context(|| {
+        format!(
+            "failed to burn subtitles into {}",
+            args.input_file.display()
+        )
+    })?;
 
     if should_cleanup_temp_files(args.keep_temp) {
         cleanup_temp_files(&cleanup_targets(&temp_paths))?;
@@ -80,7 +87,9 @@ fn cleanup_temp_files(paths: &[&Path]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_targets, cleanup_temp_files, should_cleanup_temp_files, temp_paths_for_input};
+    use super::{
+        cleanup_targets, cleanup_temp_files, should_cleanup_temp_files, temp_paths_for_input,
+    };
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
