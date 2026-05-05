@@ -12,6 +12,7 @@ pub fn subtitle_pipeline(args: &Args) -> Result<()> {
     let source_srt_path = srt::wav_to_srt(
         &temp_paths.wav_path,
         &args.whisper_model_path,
+        &args.vad_model_path,
         &args.language,
     )
     .with_context(|| {

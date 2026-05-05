@@ -1,104 +1,133 @@
-use anyhow::{Result, bail};
-use hound::WavReader;
+use anyhow::{Context, Result, bail};
+use hound::{SampleFormat, WavReader};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::thread;
-use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadContext,
+    WhisperVadContextParams, WhisperVadParams,
+};
 
-pub fn wav_to_srt<W: AsRef<Path>, M: AsRef<Path>>(
+#[derive(Debug, Clone)]
+struct SrtItem {
+    // centiseconds (1/100s)
+    start_cs: i64,
+    end_cs: i64,
+    text: String,
+}
+
+pub fn wav_to_srt<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
     wav_path: W,
-    model_path: M,
+    whisper_model: WM,
+    vad_model: VM,
     language: &str,
 ) -> Result<PathBuf> {
-    // 1) 构建 whisper 上下文参数（模型加载参数）
-    let context_param = WhisperContextParameters::default();
+    let (samples_i16, sample_rate, _channels) = check_wav_format(wav_path.as_ref())?;
 
-    let ctx = WhisperContext::new_with_params(model_path.as_ref(), context_param)
-        .map_err(|e| anyhow::anyhow!("failed to load whisper model: {e}"))?;
+    let mut audio_f32 = vec![0.0f32; samples_i16.len()];
+    whisper_rs::convert_integer_to_float_audio(&samples_i16, &mut audio_f32)
+        .context("failed to convert i16 wav samples to f32")?;
+
+    let mut vad_ctx_params = WhisperVadContextParams::default();
+    vad_ctx_params.set_n_threads(1);
+    vad_ctx_params.set_use_gpu(false);
+
+    let vad_model_path = vad_model
+        .as_ref()
+        .to_str()
+        .context("vad model path contains non-utf8 characters")?;
+    let mut vad_ctx = WhisperVadContext::new(vad_model_path, vad_ctx_params)
+        .context("failed to load vad model")?;
+
+    // Keep VAD boundaries deterministic by disabling extra overlap/padding here.
+    let mut vad_params = WhisperVadParams::new();
+    vad_params.set_speech_pad(0);
+    vad_params.set_samples_overlap(0.0);
+
+    let segments = vad_ctx
+        .segments_from_samples(vad_params, &audio_f32)
+        .context("failed to run vad segmentation")?;
+
+    let ctx = WhisperContext::new_with_params(whisper_model, WhisperContextParameters::default())
+        .context("failed to load whisper model")?;
     let mut state = ctx
         .create_state()
-        .map_err(|e| anyhow::anyhow!("failed to create whisper state: {e}"))?;
+        .context("failed to create whisper state")?;
 
-    // 3) 配置推理参数
-    // Greedy 通常更快；BeamSearch 更慢但有时更准
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let mut srt_items: Vec<SrtItem> = Vec::new();
+    let segment_pad_cs: i64 = 20; // 200ms manual boundary padding
+    let language = language.trim();
 
-    let n_threads = thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(4)
-        .min(i32::MAX as usize) as i32;
-    params.set_n_threads(n_threads);
+    for seg in segments {
+        let seg_start_cs = seg.start as i64;
+        let seg_end_cs = seg.end as i64;
 
-    // to set translate en srt
-    params.set_translate(false);
-    params.set_language(Some(language));
+        let clip_start_cs = (seg_start_cs - segment_pad_cs).max(0);
+        let clip_end_cs = seg_end_cs + segment_pad_cs;
 
-    // to close terminal output
-    params.set_print_special(false);
-    params.set_print_progress(false);
-    params.set_print_realtime(false);
-    params.set_print_timestamps(false);
+        let start_idx = ((clip_start_cs as f64 / 100.0) * sample_rate as f64) as usize;
+        let end_idx = ((clip_end_cs as f64 / 100.0) * sample_rate as f64) as usize;
+        if start_idx >= audio_f32.len() || end_idx <= start_idx {
+            continue;
+        }
 
-    // 开启 token 级时间戳（配合 DTW 时更有用）
-    params.set_token_timestamps(true);
+        let end_idx = end_idx.min(audio_f32.len());
+        let chunk = &audio_f32[start_idx..end_idx];
 
-    let reader = WavReader::open(wav_path.as_ref())?;
-    // to load wav file information
-    let spec = reader.spec();
+        let mut params = FullParams::new(SamplingStrategy::BeamSearch {
+            beam_size: 5,
+            patience: -1.0,
+        });
+        if language.is_empty() {
+            params.set_language(None);
+        } else {
+            params.set_language(Some(language));
+        }
+        params.set_translate(false);
+        params.set_no_context(true);
+        params.set_print_progress(false);
+        params.set_print_special(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
 
-    // whisper 期望输入是 16kHz
-    if spec.sample_rate != 16000 {
-        bail!("sample rate must be 16000Hz, got {}", spec.sample_rate);
+        state.full(params, chunk).with_context(|| {
+            format!("whisper decode failed for vad segment {seg_start_cs}-{seg_end_cs}cs")
+        })?;
+
+        for ws in state.as_iter() {
+            let local_start_cs = ws.start_timestamp();
+            let local_end_cs = ws.end_timestamp();
+            let text = ws.to_string();
+
+            let curr = SrtItem {
+                start_cs: clip_start_cs + local_start_cs,
+                end_cs: clip_start_cs + local_end_cs,
+                text,
+            };
+
+            if let Some(prev) = srt_items.last()
+                && should_drop(prev, &curr)
+            {
+                continue;
+            }
+
+            srt_items.push(curr);
+        }
     }
 
-    // bits_per_sample 是“每个音频采样点用多少位来存”
-    if spec.bits_per_sample != 16 {
-        bail!("bits per sample must be 16, got {}", spec.bits_per_sample);
-    }
-
-    // 把 i16 PCM 样本转成 f32（whisper 需要 f32）
-    let samples: Vec<i16> = reader
-        .into_samples::<i16>()
-        .map(|x| x.map_err(|e| anyhow::anyhow!("invalid wav sample: {e}")))
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut audio = vec![0.0f32; samples.len()];
-    whisper_rs::convert_integer_to_float_audio(&samples, &mut audio)
-        .map_err(|e| anyhow::anyhow!("failed to convert audio to f32: {e}"))?;
-
-    // 如果是双声道，转成单声道（whisper 需要 mono）
-    let mono_audio = if spec.channels == 1 {
-        audio
-    } else if spec.channels == 2 {
-        let mut output = vec![0.0f32; audio.len() / 2];
-        whisper_rs::convert_stereo_to_mono_audio(&audio, &mut output)
-            .map_err(|e| anyhow::anyhow!("failed to convert stereo to mono: {e}"))?;
-        output
-    } else {
-        bail!("unsupported wav channels: {}", spec.channels);
-    };
-
-    state
-        .full(params, &mono_audio)
-        .map_err(|e| anyhow::anyhow!("failed to run whisper inference: {e}"))?;
-
-    // 8) 写出 SRT 文件
-    let result_srt_path = wav_path.as_ref().with_extension(format!("{language}.srt"));
-    let mut file = File::create(&result_srt_path)?;
-
-    let entries = state.as_iter().map(|segment| {
-        (
-            segment.start_timestamp(),
-            segment.end_timestamp(),
-            segment.to_string(),
-        )
-    });
-    write_srt_entries(&mut file, entries)?;
+    let result_srt_path = srt_output_path(wav_path.as_ref(), language);
+    let mut file = File::create(&result_srt_path)
+        .with_context(|| format!("failed to create srt file {}", result_srt_path.display()))?;
+    write_srt_entries(&mut file, &srt_items)?;
 
     Ok(result_srt_path)
 }
 
+fn srt_output_path(wav_path: &Path, language: &str) -> PathBuf {
+    wav_path.with_extension(format!("{language}.srt"))
+}
+
+// Convert to SRT timestamp format: HH:MM:SS,mmm
 fn cs_to_srt_timestamp(cs: i64) -> String {
     let total_ms = cs * 10;
     let hours = total_ms / 3_600_000;
@@ -108,37 +137,81 @@ fn cs_to_srt_timestamp(cs: i64) -> String {
     format!("{:02}:{:02}:{:02},{:03}", hours, minutes, seconds, millis)
 }
 
-fn write_srt_entries<W, I>(writer: &mut W, entries: I) -> Result<()>
+fn write_srt_entries<W>(writer: &mut W, srt_items: &[SrtItem]) -> Result<()>
 where
     W: Write,
-    I: IntoIterator<Item = (i64, i64, String)>,
 {
     let mut sequence = 1;
 
-    for (start_cs, end_cs, text) in entries {
-        let text = text.trim();
-        if text.is_empty() {
+    for item in srt_items {
+        let text = item.text.trim();
+        if text.is_empty() || item.end_cs <= item.start_cs {
             continue;
         }
 
-        writeln!(writer, "{sequence}")?;
-        writeln!(
-            writer,
-            "{} --> {}",
-            cs_to_srt_timestamp(start_cs),
-            cs_to_srt_timestamp(end_cs)
-        )?;
-        writeln!(writer, "{text}")?;
-        writeln!(writer)?;
+        let line = format!(
+            "{}\n{} --> {}\n{}\n\n",
+            sequence,
+            cs_to_srt_timestamp(item.start_cs),
+            cs_to_srt_timestamp(item.end_cs),
+            text
+        );
+        writer.write_all(line.as_bytes())?;
         sequence += 1;
     }
 
     Ok(())
 }
 
+fn check_wav_format(path: &Path) -> Result<(Vec<i16>, u32, u16)> {
+    let reader = WavReader::open(path)?;
+    let spec = reader.spec();
+
+    if spec.sample_rate != 16000 {
+        bail!("sample rate must be 16000Hz, got {}", spec.sample_rate);
+    }
+    if spec.channels != 1 {
+        bail!("channels must be mono(1), got {}", spec.channels);
+    }
+    if spec.sample_format != SampleFormat::Int || spec.bits_per_sample != 16 {
+        bail!("bits per sample must be 16, got {}", spec.bits_per_sample);
+    }
+
+    let samples: Vec<i16> = reader
+        .into_samples::<i16>()
+        .map(|x| x.map_err(|e| anyhow::anyhow!("invalid wav sample: {e}")))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok((samples, spec.sample_rate, spec.channels))
+}
+
+fn norm_text(s: &str) -> String {
+    s.trim().to_lowercase()
+}
+
+// Drop duplicate segments when text matches exactly, or overlapped text includes each other.
+fn should_drop(prev: &SrtItem, curr: &SrtItem) -> bool {
+    let p = norm_text(&prev.text);
+    let c = norm_text(&curr.text);
+
+    if p.is_empty() || c.is_empty() {
+        return false;
+    }
+    if p == c {
+        return true;
+    }
+
+    let overlap =
+        std::cmp::min(prev.end_cs, curr.end_cs) - std::cmp::max(prev.start_cs, curr.start_cs);
+    let has_overlap = overlap > 0;
+
+    has_overlap && (p.contains(&c) || c.contains(&p))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cs_to_srt_timestamp, write_srt_entries};
+    use super::{SrtItem, cs_to_srt_timestamp, should_drop, srt_output_path, write_srt_entries};
+    use std::path::Path;
 
     #[test]
     fn timestamp_format_matches_srt_spec() {
@@ -146,21 +219,81 @@ mod tests {
     }
 
     #[test]
+    fn output_path_uses_language_extension() {
+        let path = srt_output_path(Path::new("/tmp/example.wav"), "en");
+        assert_eq!(path, Path::new("/tmp/example.en.srt"));
+    }
+
+    #[test]
     fn srt_sequence_remains_contiguous_when_empty_segments_are_skipped() {
         let mut output = Vec::new();
-        write_srt_entries(
-            &mut output,
-            vec![
-                (0, 100, "Hello".to_string()),
-                (100, 200, "   ".to_string()),
-                (200, 300, "World".to_string()),
-            ],
-        )
-        .unwrap();
+        let items = vec![
+            SrtItem {
+                start_cs: 0,
+                end_cs: 100,
+                text: "Hello".to_string(),
+            },
+            SrtItem {
+                start_cs: 100,
+                end_cs: 200,
+                text: "   ".to_string(),
+            },
+            SrtItem {
+                start_cs: 200,
+                end_cs: 300,
+                text: "World".to_string(),
+            },
+        ];
+        write_srt_entries(&mut output, &items).unwrap();
 
         let rendered = String::from_utf8(output).unwrap();
         assert!(rendered.contains("1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"));
         assert!(rendered.contains("2\n00:00:02,000 --> 00:00:03,000\nWorld\n\n"));
         assert!(!rendered.contains("3\n"));
+    }
+
+    #[test]
+    fn should_drop_for_exact_overlap_duplicates() {
+        let prev = SrtItem {
+            start_cs: 0,
+            end_cs: 100,
+            text: "Hello world".to_string(),
+        };
+        let curr = SrtItem {
+            start_cs: 60,
+            end_cs: 160,
+            text: "hello world".to_string(),
+        };
+        assert!(should_drop(&prev, &curr));
+    }
+
+    #[test]
+    fn should_drop_for_overlapped_contains_relation() {
+        let prev = SrtItem {
+            start_cs: 0,
+            end_cs: 100,
+            text: "hello world".to_string(),
+        };
+        let curr = SrtItem {
+            start_cs: 50,
+            end_cs: 160,
+            text: "hello".to_string(),
+        };
+        assert!(should_drop(&prev, &curr));
+    }
+
+    #[test]
+    fn should_not_drop_for_non_overlapping_segments() {
+        let prev = SrtItem {
+            start_cs: 0,
+            end_cs: 100,
+            text: "hello world".to_string(),
+        };
+        let curr = SrtItem {
+            start_cs: 120,
+            end_cs: 200,
+            text: "hello".to_string(),
+        };
+        assert!(!should_drop(&prev, &curr));
     }
 }

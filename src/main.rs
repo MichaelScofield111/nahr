@@ -26,6 +26,13 @@ struct Args {
     #[arg(long, value_name = "FILE", default_value = "models/ggml-base.bin")]
     whisper_model_path: PathBuf,
 
+    #[arg(
+        long,
+        value_name = "FILE",
+        default_value = "models/ggml-silero-v5.1.2.bin"
+    )]
+    vad_model_path: PathBuf,
+
     #[arg(long, default_value_t = false)]
     keep_temp: bool,
 }
