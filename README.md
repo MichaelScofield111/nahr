@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/nahr-logo.png" alt="nahr logo" width="220">
+  <img src="assets/nahr-logo-black.png" alt="nahr logo" width="260">
 </p>
 
-<h1 align="center">nahr</h1>
+<h1 align="center">𝓷𝓪𝓱𝓻</h1>
 
 <p align="center">
   A Rust CLI for transcribing video, translating subtitles into Simplified Chinese, and burning them into a new MP4.
