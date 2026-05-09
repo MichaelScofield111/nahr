@@ -25,6 +25,7 @@ Output video name:
 ## Requirements
 
 - Rust toolchain
+- Python 3.9+
 - `ffmpeg` executable
 - FFmpeg built with `libass` (required by `subtitles` filter)
 
@@ -60,6 +61,19 @@ curl -L "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5
 
 ### 3) Build
 
+Install Python translation dependencies:
+
+```bash
+cd script
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install torch transformers srt
+cd ..
+```
+
+Then build Rust:
+
 ```bash
 cargo build --release
 ```
@@ -69,9 +83,13 @@ cargo build --release
 ```bash
 cargo run --release -- \
   --input-file assets/example.mp4 \
-  --language en \
-  --whisper-model-path models/ggml-base.bin \
-  --vad-model-path models/ggml-silero-v5.1.2.bin
+  --language en
+```
+
+Or even shorter, since English is already the default:
+
+```bash
+cargo run --release -- --input-file assets/example.mp4
 ```
 
 If you want to keep temporary `.wav/.srt` files:
@@ -89,9 +107,9 @@ cargo run --release -- \
 
 - `--input-file <FILE>`: Input MP4 file (required)
 - `--language <LANG>`: Source language (`en` default, translation supports `en` and `ja`)
-- `--whisper-model-path <FILE>`: Whisper model path (default: `models/ggml-base.bin`)
-- `--vad-model-path <FILE>`: VAD model path (default: `models/ggml-silero-v5.1.2.bin`)
 - `--keep-temp`: Keep intermediate WAV/SRT files
+
+Advanced options still exist for custom setups, but the default workflow does not require passing model/script paths explicitly.
 
 ## Intermediate Files
 
@@ -131,8 +149,17 @@ Possible reasons:
 - FFmpeg without `libass`
 - Subtitle path escaping/permissions issue
 
+### Translator script failed
+
+Check:
+
+- `python3` is available, or pass `--python-bin <path>`
+- `script/trans.py` exists, or pass `--translator-script-path <path>`
+- Python dependencies are installed
+- The translation model can be downloaded or already exists in local cache
+
 ## Notes
 
 - `models/` is ignored by git; do not commit model binaries.
-- First translation run may download model assets required by `rust-bert`.
+- First translation run may download model assets required by `transformers`.
 - Keep original input videos as backup; burn-in rewrites output video.

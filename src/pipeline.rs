@@ -1,9 +1,17 @@
 use crate::{Args, bake::burn_subtitles, cn_srt, srt, wav};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn subtitle_pipeline(args: &Args) -> Result<()> {
+    let whisper_model_path = resolve_support_file(&args.whisper_model_path);
+    let vad_model_path = resolve_support_file(&args.vad_model_path);
+    let translator_script_path = resolve_support_file(&args.translator_script_path);
+
+    ensure_exists(&whisper_model_path, "whisper model")?;
+    ensure_exists(&vad_model_path, "vad model")?;
+    ensure_exists(&translator_script_path, "translator script")?;
+
     let temp_paths = temp_paths_for_input(&args.input_file, &args.language);
 
     wav::extract_wav(&args.input_file, &temp_paths.wav_path)
@@ -11,8 +19,8 @@ pub fn subtitle_pipeline(args: &Args) -> Result<()> {
 
     let source_srt_path = srt::wav_to_srt(
         &temp_paths.wav_path,
-        &args.whisper_model_path,
-        &args.vad_model_path,
+        &whisper_model_path,
+        &vad_model_path,
         &args.language,
     )
     .with_context(|| {
@@ -23,7 +31,13 @@ pub fn subtitle_pipeline(args: &Args) -> Result<()> {
     })?;
     debug_assert_eq!(source_srt_path, temp_paths.source_srt_path);
 
-    let cn_srt_path = cn_srt::gen_cnsrt(&source_srt_path, &args.language).with_context(|| {
+    let cn_srt_path = cn_srt::gen_cnsrt(
+        &source_srt_path,
+        &args.python_bin,
+        &translator_script_path,
+        &temp_paths.cn_srt_path,
+    )
+    .with_context(|| {
         format!(
             "failed to translate subtitles from {}",
             source_srt_path.display()
@@ -43,6 +57,40 @@ pub fn subtitle_pipeline(args: &Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_support_file(path: &Path) -> PathBuf {
+    if path.exists() {
+        return path.to_path_buf();
+    }
+
+    let manifest_candidate = Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+    if manifest_candidate.exists() {
+        return manifest_candidate;
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        for ancestor in exe_path.ancestors() {
+            let candidate = ancestor.join(path);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+
+    path.to_path_buf()
+}
+
+fn ensure_exists(path: &Path, label: &str) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+
+    bail!(
+        "{} not found: {}. Put it at that default path or pass the custom path explicitly.",
+        label,
+        path.display()
+    );
 }
 
 struct TempPaths {
@@ -89,7 +137,8 @@ fn cleanup_temp_files(paths: &[&Path]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_targets, cleanup_temp_files, should_cleanup_temp_files, temp_paths_for_input,
+        cleanup_targets, cleanup_temp_files, ensure_exists, resolve_support_file,
+        should_cleanup_temp_files, temp_paths_for_input,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -143,6 +192,23 @@ mod tests {
                 Path::new("/tmp/demo.en.cn.srt"),
             ]
         );
+    }
+
+    #[test]
+    fn resolve_support_file_prefers_existing_manifest_relative_path() {
+        let resolved = resolve_support_file(Path::new("script/trans.py"));
+        assert!(resolved.ends_with(Path::new("script/trans.py")));
+        assert!(resolved.exists());
+    }
+
+    #[test]
+    fn ensure_exists_returns_clear_error_for_missing_file() {
+        let err = ensure_exists(
+            Path::new("/tmp/definitely-missing-model.bin"),
+            "whisper model",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("whisper model not found"));
     }
 
     fn unique_test_dir() -> PathBuf {

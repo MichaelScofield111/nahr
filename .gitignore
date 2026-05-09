@@ -1,4 +1,29 @@
 /target
 /models
+.uv-cache
+script/.uv-cache
+script/.venv
 .DS_Store
 **/.DS_Store
+
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# uv
+.uv/
+uv.lock

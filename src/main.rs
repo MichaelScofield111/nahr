@@ -20,18 +20,35 @@ struct Args {
     #[arg(short, long, value_name = "FILE")]
     input_file: PathBuf,
 
-    #[arg(long, value_name = "LANG", default_value = "en")]
+    #[arg(short = 'l', long, value_name = "LANG", default_value = "en")]
     language: String,
 
-    #[arg(long, value_name = "FILE", default_value = "models/ggml-base.bin")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        default_value = "models/ggml-base.bin",
+        hide = true
+    )]
     whisper_model_path: PathBuf,
 
     #[arg(
         long,
         value_name = "FILE",
-        default_value = "models/ggml-silero-v5.1.2.bin"
+        default_value = "models/ggml-silero-v5.1.2.bin",
+        hide = true
     )]
     vad_model_path: PathBuf,
+
+    #[arg(long, value_name = "BIN", default_value = "python3", hide = true)]
+    python_bin: String,
+
+    #[arg(
+        long,
+        value_name = "FILE",
+        default_value = "script/trans.py",
+        hide = true
+    )]
+    translator_script_path: PathBuf,
 
     #[arg(long, default_value_t = false)]
     keep_temp: bool,

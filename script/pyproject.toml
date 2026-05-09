@@ -1,0 +1,21 @@
+
+[project]
+name = "video-transcribe"
+version = "0.1.0"
+description = "Video transcription and translation CLI tool with GPU acceleration"
+requires-python = ">=3.9"
+
+dependencies = [
+    "httpx[socks]>=0.28.1",
+    "socksio>=1.0.0",
+    "torch>=2.0.0",
+    "transformers>=4.30.0",
+    "srt>=3.5.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
