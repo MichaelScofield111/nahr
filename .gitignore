@@ -27,3 +27,4 @@ ENV/
 # uv
 .uv/
 uv.lock
+models/*.bin
