@@ -8,6 +8,9 @@
   A Rust CLI for transcribing video, translating subtitles into Simplified Chinese, and burning them into a new MP4.
 </p>
 
+> [!WARNING]
+> Here be dragons! As I plan to ship a torrent of features in the following months, future updates **will** contain **breaking changes**.
+
 ## What This Project Does
 
 Given one input MP4, the pipeline does:
