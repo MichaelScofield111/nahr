@@ -25,8 +25,8 @@ pub fn str_translate<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
     vad_model: VM,
     language: &str,
 ) -> Result<()> {
-    let str_item = wav_to_srt(&wav_path, &whisper_model, &vad_model, &language)
-        .with_context(|| format!("failed to generate source subtitles",))?;
+    let str_item = wav_to_srt(&wav_path, &whisper_model, &vad_model, language)
+        .with_context(|| "failed to generate source subtitles".to_string())?;
 
     let mut file = File::create(&target_srt_path).with_context(|| {
         format!(
