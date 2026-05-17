@@ -1,12 +1,14 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use hound::{SampleFormat, WavReader};
 use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperVadContext,
     WhisperVadContextParams, WhisperVadParams,
 };
+
+use crate::translate::{LanguagePair, MarianTranslator};
 
 #[derive(Debug, Clone)]
 struct SrtItem {
@@ -16,12 +18,35 @@ struct SrtItem {
     text: String,
 }
 
-pub fn wav_to_srt<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
+pub fn str_translate<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
+    wav_path: W,
+    target_srt_path: W,
+    whisper_model: WM,
+    vad_model: VM,
+    language: &str,
+) -> Result<()> {
+    let str_item = wav_to_srt(&wav_path, &whisper_model, &vad_model, &language)
+        .with_context(|| format!("failed to generate source subtitles",))?;
+
+    let mut file = File::create(&target_srt_path).with_context(|| {
+        format!(
+            "failed to create srt file {}",
+            target_srt_path.as_ref().display()
+        )
+    })?;
+
+    let _ = match language {
+        "en" => translate_srt_entries(&mut file, &str_item),
+        _ => return Err(anyhow!("no support")),
+    };
+    Ok(())
+}
+fn wav_to_srt<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
     wav_path: W,
     whisper_model: WM,
     vad_model: VM,
     language: &str,
-) -> Result<PathBuf> {
+) -> Result<Vec<SrtItem>> {
     let (samples_i16, sample_rate, _channels) = check_wav_format(wav_path.as_ref())?;
 
     let mut audio_f32 = vec![0.0f32; samples_i16.len()];
@@ -115,16 +140,7 @@ pub fn wav_to_srt<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
         }
     }
 
-    let result_srt_path = srt_output_path(wav_path.as_ref(), language);
-    let mut file = File::create(&result_srt_path)
-        .with_context(|| format!("failed to create srt file {}", result_srt_path.display()))?;
-    write_srt_entries(&mut file, &srt_items)?;
-
-    Ok(result_srt_path)
-}
-
-fn srt_output_path(wav_path: &Path, language: &str) -> PathBuf {
-    wav_path.with_extension(format!("{language}.srt"))
+    Ok(srt_items)
 }
 
 // Convert to SRT timestamp format: HH:MM:SS,mmm
@@ -137,15 +153,18 @@ fn cs_to_srt_timestamp(cs: i64) -> String {
     format!("{:02}:{:02}:{:02},{:03}", hours, minutes, seconds, millis)
 }
 
-fn write_srt_entries<W>(writer: &mut W, srt_items: &[SrtItem]) -> Result<()>
+fn translate_srt_entries<W>(writer: &mut W, srt_items: &[SrtItem]) -> Result<()>
 where
     W: Write,
 {
+    let mut translator = MarianTranslator::translate(&LanguagePair::EnZh)?;
+
     let mut sequence = 1;
 
     for item in srt_items {
         let text = item.text.trim();
-        if text.is_empty() || item.end_cs <= item.start_cs {
+        let translate_str = translator.translate_text(text)?;
+        if translate_str.is_empty() || item.end_cs <= item.start_cs {
             continue;
         }
 
@@ -154,12 +173,11 @@ where
             sequence,
             cs_to_srt_timestamp(item.start_cs),
             cs_to_srt_timestamp(item.end_cs),
-            text
+            translate_str,
         );
         writer.write_all(line.as_bytes())?;
         sequence += 1;
     }
-
     Ok(())
 }
 
@@ -209,19 +227,39 @@ fn should_drop(prev: &SrtItem, curr: &SrtItem) -> bool {
 }
 
 #[cfg(test)]
+fn write_srt_entries<W>(writer: &mut W, srt_items: &[SrtItem]) -> Result<()>
+where
+    W: Write,
+{
+    let mut sequence = 1;
+
+    for item in srt_items {
+        let text = item.text.trim();
+        if text.is_empty() || item.end_cs <= item.start_cs {
+            continue;
+        }
+
+        let line = format!(
+            "{}\n{} --> {}\n{}\n\n",
+            sequence,
+            cs_to_srt_timestamp(item.start_cs),
+            cs_to_srt_timestamp(item.end_cs),
+            text,
+        );
+        writer.write_all(line.as_bytes())?;
+        sequence += 1;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
-    use super::{SrtItem, cs_to_srt_timestamp, should_drop, srt_output_path, write_srt_entries};
-    use std::path::Path;
+    use super::{SrtItem, cs_to_srt_timestamp, should_drop, write_srt_entries};
 
     #[test]
     fn timestamp_format_matches_srt_spec() {
         assert_eq!(cs_to_srt_timestamp(372_345), "01:02:03,450");
-    }
-
-    #[test]
-    fn output_path_uses_language_extension() {
-        let path = srt_output_path(Path::new("/tmp/example.wav"), "en");
-        assert_eq!(path, Path::new("/tmp/example.en.srt"));
     }
 
     #[test]

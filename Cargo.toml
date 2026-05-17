@@ -11,3 +11,9 @@ ffmpeg-next = "8.1.0"
 hound = "3.5.1"
 whisper-rs = "0.16.0"
 console = { version = "0.16.3", features = ["std"] }
+candle-core = { version = "0.10.2", features = ["accelerate"] }
+candle-nn = { version = "0.10.2", features = ["accelerate"] }
+candle-examples = { version = "0.10.2", features = ["accelerate"] }
+candle-transformers = { version = "0.10.2", features = ["accelerate"] }
+hf-hub = "0.5.0"
+tokenizers = "0.22.2"
