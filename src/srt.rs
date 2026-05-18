@@ -140,6 +140,9 @@ fn wav_to_srt<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
         }
     }
 
+    let mut file = File::create("./assets/test.en.srt")?;
+    write_srt_entries(&mut file, &srt_items)?;
+
     Ok(srt_items)
 }
 
@@ -226,7 +229,6 @@ fn should_drop(prev: &SrtItem, curr: &SrtItem) -> bool {
     has_overlap && (p.contains(&c) || c.contains(&p))
 }
 
-#[cfg(test)]
 fn write_srt_entries<W>(writer: &mut W, srt_items: &[SrtItem]) -> Result<()>
 where
     W: Write,

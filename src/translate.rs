@@ -12,8 +12,8 @@ pub struct MarianTranslator {
     config: marian::Config,
     tokenizer: Tokenizer,
     tokenizer_dec: TokenOutputStream,
-    model: marian::MTModel,
     device: Device,
+    model_path: std::path::PathBuf, // 改为存路径
 }
 
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
@@ -22,6 +22,13 @@ pub enum LanguagePair {
     EnZh,
 }
 impl MarianTranslator {
+    fn build_model(&self) -> anyhow::Result<marian::MTModel> {
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(&[&self.model_path], DType::F32, &self.device)?
+        };
+        Ok(marian::MTModel::new(&self.config, vb)?)
+    }
+
     pub fn translate(language_pair: &LanguagePair) -> anyhow::Result<Self> {
         let config = match language_pair {
             LanguagePair::EnZh => marian::Config::opus_mt_en_zh(),
@@ -57,7 +64,7 @@ impl MarianTranslator {
 
         let device = candle_examples::device(true)?;
 
-        let model = {
+        let model_path = {
             let api = Api::new()?;
             let api = match language_pair {
                 LanguagePair::EnZh => api.repo(hf_hub::Repo::with_revision(
@@ -68,21 +75,22 @@ impl MarianTranslator {
             };
             api.get("model.safetensors")?
         };
-        let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[&model], DType::F32, &device)? };
-        let model = marian::MTModel::new(&config, vb)?;
 
         Ok(Self {
             config,
             tokenizer,
             tokenizer_dec,
-            model,
             device,
+            model_path, // 存路径而不是 model
         })
     }
 
     pub fn translate_text(&mut self, text: &str) -> anyhow::Result<String> {
         self.tokenizer_dec.clear();
         let mut output = String::new();
+
+        // 每次翻译重建 model，彻底消除 cache 污染
+        let mut model = self.build_model()?;
 
         let mut logits_processor =
             candle_transformers::generation::LogitsProcessor::new(1337, None, None);
@@ -96,7 +104,7 @@ impl MarianTranslator {
                 .to_vec();
             tokens.push(self.config.eos_token_id);
             let tokens = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
-            self.model.encoder().forward(&tokens, 0)?
+            model.encoder().forward(&tokens, 0)?
         };
 
         let mut token_ids = vec![self.config.decoder_start_token_id];
@@ -104,7 +112,7 @@ impl MarianTranslator {
             let context_size = if index >= 1 { 1 } else { token_ids.len() };
             let start_pos = token_ids.len().saturating_sub(context_size);
             let input_ids = Tensor::new(&token_ids[start_pos..], &self.device)?.unsqueeze(0)?;
-            let logits = self.model.decode(&input_ids, &encoder_xs, start_pos)?;
+            let logits = model.decode(&input_ids, &encoder_xs, start_pos)?;
             let logits = logits.squeeze(0)?;
             let logits = logits.get(logits.dim(0)? - 1)?;
             let token = logits_processor.sample(&logits)?;
