@@ -35,10 +35,7 @@ pub fn str_translate<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
         )
     })?;
 
-    let _ = match language {
-        "en" => translate_srt_entries(&mut file, &str_item),
-        _ => return Err(anyhow!("no support")),
-    };
+    translate_srt_entries(&mut file, &str_item, language)?;
     Ok(())
 }
 fn wav_to_srt<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
@@ -156,11 +153,19 @@ fn cs_to_srt_timestamp(cs: i64) -> String {
     format!("{:02}:{:02}:{:02},{:03}", hours, minutes, seconds, millis)
 }
 
-fn translate_srt_entries<W>(writer: &mut W, srt_items: &[SrtItem]) -> Result<()>
+fn translate_srt_entries<W>(
+    writer: &mut W,
+    srt_items: &[SrtItem],
+    language_type: &str,
+) -> Result<()>
 where
     W: Write,
 {
-    let mut translator = MarianTranslator::translate(&LanguagePair::EnZh)?;
+    let mut translator = match language_type {
+        "en" => MarianTranslator::translate(&LanguagePair::EnZh)?,
+        "ja" => MarianTranslator::translate(&LanguagePair::JaZh)?,
+        _ => return Err(anyhow!("no support")),
+    };
 
     let mut sequence = 1;
 

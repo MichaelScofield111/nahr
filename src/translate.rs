@@ -16,10 +16,42 @@ pub struct MarianTranslator {
     model_path: std::path::PathBuf, // 改为存路径
 }
 
+trait MarianConfigExt {
+    fn opus_mt_ja_zh() -> Self;
+}
+
+impl MarianConfigExt for marian::Config {
+    fn opus_mt_ja_zh() -> Self {
+        Self {
+            activation_function: candle_nn::Activation::Swish,
+            d_model: 512,
+            decoder_attention_heads: 8,
+            decoder_ffn_dim: 2048,
+            decoder_layers: 6,
+            decoder_start_token_id: 65000,
+            decoder_vocab_size: Some(65001),
+            encoder_attention_heads: 8,
+            encoder_ffn_dim: 2048,
+            encoder_layers: 6,
+            eos_token_id: 0,
+            forced_eos_token_id: 0,
+            is_encoder_decoder: true,
+            max_position_embeddings: 512,
+            pad_token_id: 65000,
+            scale_embedding: true,
+            share_encoder_decoder_embeddings: true,
+            use_cache: true,
+            vocab_size: 65001,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum LanguagePair {
     // value(name = "en-zh")
     EnZh,
+    // value(name = "ja-zh")
+    JaZh,
 }
 impl MarianTranslator {
     fn build_model(&self) -> anyhow::Result<marian::MTModel> {
@@ -32,16 +64,21 @@ impl MarianTranslator {
     pub fn translate(language_pair: &LanguagePair) -> anyhow::Result<Self> {
         let config = match language_pair {
             LanguagePair::EnZh => marian::Config::opus_mt_en_zh(),
+            LanguagePair::JaZh => marian::Config::opus_mt_ja_zh(),
         };
 
         let tokenizer_default_repo = match language_pair {
             LanguagePair::EnZh => "KeighBee/candle-marian",
+
+            // this repo is special repo, this repo supports ja-zh.json configuration
+            LanguagePair::JaZh => "MichaelScofield111/nahr",
         };
 
         // encoder tokenizer (source language)
         let tokenizer = {
             let filename = match language_pair {
                 LanguagePair::EnZh => "tokenizer-marian-base-en-zh-en.json",
+                LanguagePair::JaZh => "tokenizer-marian-base-ja-zh-ja.json",
             };
             let path = Api::new()?
                 .model(tokenizer_default_repo.to_string())
@@ -53,6 +90,7 @@ impl MarianTranslator {
         let tokenizer_dec = {
             let filename = match language_pair {
                 LanguagePair::EnZh => "tokenizer-marian-base-en-zh-zh.json",
+                LanguagePair::JaZh => "tokenizer-marian-base-ja-zh-zh.json",
             };
             let path = Api::new()?
                 .model(tokenizer_default_repo.to_string())
@@ -71,6 +109,13 @@ impl MarianTranslator {
                     "Helsinki-NLP/opus-mt-en-zh".to_string(),
                     hf_hub::RepoType::Model,
                     "refs/pr/13".to_string(),
+                )),
+                LanguagePair::JaZh => api.repo(hf_hub::Repo::with_revision(
+                    "
+                    shun89/opus-mt-ja-zh"
+                        .to_string(),
+                    hf_hub::RepoType::Model,
+                    "refs/pr/2".to_string(),
                 )),
             };
             api.get("model.safetensors")?
