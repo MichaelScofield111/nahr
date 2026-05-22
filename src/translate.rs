@@ -111,9 +111,7 @@ impl MarianTranslator {
                     "refs/pr/13".to_string(),
                 )),
                 LanguagePair::JaZh => api.repo(hf_hub::Repo::with_revision(
-                    "
-                    shun89/opus-mt-ja-zh"
-                        .to_string(),
+                    "shun89/opus-mt-ja-zh".to_string(),
                     hf_hub::RepoType::Model,
                     "refs/pr/2".to_string(),
                 )),
