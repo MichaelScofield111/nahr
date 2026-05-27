@@ -10,6 +10,10 @@ use whisper_rs::{
 
 use crate::translate::{LanguagePair, MarianTranslator};
 
+const VAD_THRESHOLD: f32 = 0.35;
+const VAD_MIN_SPEECH_DURATION_MS: i32 = 120;
+const VAD_MIN_SILENCE_DURATION_MS: i32 = 60;
+
 #[derive(Debug, Clone)]
 struct SrtItem {
     // centiseconds (1/100s)
@@ -27,6 +31,12 @@ pub fn str_translate<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
 ) -> Result<()> {
     let str_item = wav_to_srt(&wav_path, &whisper_model, &vad_model, language)
         .with_context(|| "failed to generate source subtitles".to_string())?;
+    if str_item.is_empty() {
+        bail!(
+            "source subtitle generation produced no entries for {}",
+            wav_path.as_ref().display()
+        );
+    }
 
     let mut file = File::create(&target_srt_path).with_context(|| {
         format!(
@@ -35,7 +45,13 @@ pub fn str_translate<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
         )
     })?;
 
-    translate_srt_entries(&mut file, &str_item, language)?;
+    let translated_entries = translate_srt_entries(&mut file, &str_item, language)?;
+    if translated_entries == 0 {
+        bail!(
+            "translated subtitle generation produced no entries for {}",
+            target_srt_path.as_ref().display()
+        );
+    }
     Ok(())
 }
 fn wav_to_srt<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
@@ -63,12 +79,21 @@ fn wav_to_srt<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
 
     // Keep VAD boundaries deterministic by disabling extra overlap/padding here.
     let mut vad_params = WhisperVadParams::new();
+    vad_params.set_threshold(VAD_THRESHOLD);
+    vad_params.set_min_speech_duration(VAD_MIN_SPEECH_DURATION_MS);
+    vad_params.set_min_silence_duration(VAD_MIN_SILENCE_DURATION_MS);
     vad_params.set_speech_pad(0);
     vad_params.set_samples_overlap(0.0);
 
     let segments = vad_ctx
         .segments_from_samples(vad_params, &audio_f32)
         .context("failed to run vad segmentation")?;
+    if segments.num_segments() == 0 {
+        bail!(
+            "audio extraction succeeded for {}, but VAD detected no speech segments; try relaxing VAD parameters or using a different input",
+            wav_path.as_ref().display()
+        );
+    }
 
     let ctx = WhisperContext::new_with_params(whisper_model, WhisperContextParameters::default())
         .context("failed to load whisper model")?;
@@ -138,7 +163,13 @@ fn wav_to_srt<W: AsRef<Path>, WM: AsRef<Path>, VM: AsRef<Path>>(
     }
 
     let mut file = File::create("./assets/test.en.srt")?;
-    write_srt_entries(&mut file, &srt_items)?;
+    let source_entries = write_srt_entries(&mut file, &srt_items)?;
+    if source_entries == 0 {
+        bail!(
+            "whisper produced no subtitle entries for {}; refusing to generate empty subtitles",
+            wav_path.as_ref().display()
+        );
+    }
 
     Ok(srt_items)
 }
@@ -157,22 +188,32 @@ fn translate_srt_entries<W>(
     writer: &mut W,
     srt_items: &[SrtItem],
     language_type: &str,
-) -> Result<()>
+) -> Result<usize>
 where
     W: Write,
 {
-    let mut translator = match language_type {
-        "en" => MarianTranslator::translate(&LanguagePair::EnZh)?,
-        "ja" => MarianTranslator::translate(&LanguagePair::JaZh)?,
+    if srt_items.is_empty() {
+        bail!("source subtitles are empty; skipping translation");
+    }
+
+    let language_pair = match language_type {
+        "en" => LanguagePair::EnZh,
+        "ja" => LanguagePair::JaZh,
         _ => return Err(anyhow!("no support")),
     };
+
+    let mut translator = MarianTranslator::try_new(language_pair)?;
 
     let mut sequence = 1;
 
     for item in srt_items {
         let text = item.text.trim();
-        let translate_str = translator.translate_text(text)?;
-        if translate_str.is_empty() || item.end_cs <= item.start_cs {
+        if text.is_empty() || item.end_cs <= item.start_cs {
+            continue;
+        }
+
+        let translated = translator.translate_text(text)?;
+        if translated.is_empty() {
             continue;
         }
 
@@ -181,12 +222,12 @@ where
             sequence,
             cs_to_srt_timestamp(item.start_cs),
             cs_to_srt_timestamp(item.end_cs),
-            translate_str,
+            translated,
         );
         writer.write_all(line.as_bytes())?;
         sequence += 1;
     }
-    Ok(())
+    Ok(sequence - 1)
 }
 
 fn check_wav_format(path: &Path) -> Result<(Vec<i16>, u32, u16)> {
@@ -234,7 +275,7 @@ fn should_drop(prev: &SrtItem, curr: &SrtItem) -> bool {
     has_overlap && (p.contains(&c) || c.contains(&p))
 }
 
-fn write_srt_entries<W>(writer: &mut W, srt_items: &[SrtItem]) -> Result<()>
+fn write_srt_entries<W>(writer: &mut W, srt_items: &[SrtItem]) -> Result<usize>
 where
     W: Write,
 {
@@ -257,12 +298,13 @@ where
         sequence += 1;
     }
 
-    Ok(())
+    Ok(sequence - 1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{SrtItem, cs_to_srt_timestamp, should_drop, write_srt_entries};
+    use anyhow::Result;
 
     #[test]
     fn timestamp_format_matches_srt_spec() {
@@ -289,12 +331,28 @@ mod tests {
                 text: "World".to_string(),
             },
         ];
-        write_srt_entries(&mut output, &items).unwrap();
+        let written = write_srt_entries(&mut output, &items).unwrap();
+        assert_eq!(written, 2);
 
         let rendered = String::from_utf8(output).unwrap();
         assert!(rendered.contains("1\n00:00:00,000 --> 00:00:01,000\nHello\n\n"));
         assert!(rendered.contains("2\n00:00:02,000 --> 00:00:03,000\nWorld\n\n"));
         assert!(!rendered.contains("3\n"));
+    }
+
+    #[test]
+    fn write_srt_entries_returns_zero_for_invalid_items() -> Result<()> {
+        let mut output = Vec::new();
+        let items = vec![SrtItem {
+            start_cs: 100,
+            end_cs: 100,
+            text: "ignored".to_string(),
+        }];
+
+        let written = write_srt_entries(&mut output, &items)?;
+        assert_eq!(written, 0);
+        assert!(output.is_empty());
+        Ok(())
     }
 
     #[test]
