@@ -13,8 +13,11 @@ pub struct MarianTranslator {
     tokenizer: Tokenizer,
     tokenizer_dec: TokenOutputStream,
     device: Device,
-    model_path: std::path::PathBuf, // 改为存路径
+    // to init once
+    model: marian::MTModel,
 }
+
+const JA_ZH_ALIAS_TARGET: &str = "lm_head.weight";
 
 trait MarianConfigExt {
     fn opus_mt_ja_zh() -> Self;
@@ -54,14 +57,7 @@ pub enum LanguagePair {
     JaZh,
 }
 impl MarianTranslator {
-    fn build_model(&self) -> anyhow::Result<marian::MTModel> {
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[&self.model_path], DType::F32, &self.device)?
-        };
-        Ok(marian::MTModel::new(&self.config, vb)?)
-    }
-
-    pub fn translate(language_pair: &LanguagePair) -> anyhow::Result<Self> {
+    pub fn try_new(language_pair: LanguagePair) -> anyhow::Result<Self> {
         let config = match language_pair {
             LanguagePair::EnZh => marian::Config::opus_mt_en_zh(),
             LanguagePair::JaZh => marian::Config::opus_mt_ja_zh(),
@@ -69,8 +65,7 @@ impl MarianTranslator {
 
         let tokenizer_default_repo = match language_pair {
             LanguagePair::EnZh => "KeighBee/candle-marian",
-
-            // this repo is special repo, this repo supports ja-zh.json configuration
+            // this repo is special: it hosts ja-zh tokenizer configs
             LanguagePair::JaZh => "MichaelScofield111/nahr",
         };
 
@@ -99,12 +94,11 @@ impl MarianTranslator {
         };
 
         let tokenizer_dec = TokenOutputStream::new(tokenizer_dec);
-
         let device = candle_examples::device(true)?;
 
         let model_path = {
             let api = Api::new()?;
-            let api = match language_pair {
+            let repo = match language_pair {
                 LanguagePair::EnZh => api.repo(hf_hub::Repo::with_revision(
                     "Helsinki-NLP/opus-mt-en-zh".to_string(),
                     hf_hub::RepoType::Model,
@@ -116,15 +110,35 @@ impl MarianTranslator {
                     "refs/pr/2".to_string(),
                 )),
             };
-            api.get("model.safetensors")?
+            repo.get("model.safetensors")?
         };
+
+        // --- 修复：在 rename 之前验证原始文件里的实际 key ---
+        let vb_raw =
+            unsafe { VarBuilder::from_mmaped_safetensors(&[&model_path], DType::F32, &device)? };
+        if language_pair == LanguagePair::JaZh && !vb_raw.contains_tensor(JA_ZH_ALIAS_TARGET) {
+            anyhow::bail!(
+                "ja-zh model at {} is missing expected tensor '{}'; \
+                        the safetensors file may be corrupt or from an incompatible conversion",
+                model_path.display(),
+                JA_ZH_ALIAS_TARGET,
+            );
+        }
+
+        // Apply name remapping for ja-zh (see translate.rs module doc for why)
+        let vb = match language_pair {
+            LanguagePair::EnZh => vb_raw,
+            LanguagePair::JaZh => vb_raw.rename_f(|name| remap_ja_zh_tensor_name(name).to_string()),
+        };
+
+        let model = marian::MTModel::new(&config, vb)?;
 
         Ok(Self {
             config,
             tokenizer,
             tokenizer_dec,
             device,
-            model_path, // 存路径而不是 model
+            model,
         })
     }
 
@@ -132,9 +146,8 @@ impl MarianTranslator {
         self.tokenizer_dec.clear();
         let mut output = String::new();
 
-        // 每次翻译重建 model，彻底消除 cache 污染
-        let mut model = self.build_model()?;
-
+        // Marian's KV-cache is local to each forward pass; we only need to reset
+        // the decoder token stream above — no need to rebuild the whole model.
         let mut logits_processor =
             candle_transformers::generation::LogitsProcessor::new(1337, None, None);
 
@@ -175,5 +188,43 @@ impl MarianTranslator {
         }
 
         Ok(output)
+    }
+}
+
+fn remap_ja_zh_tensor_name(name: &str) -> &str {
+    match name {
+        "model.shared.weight"
+        | "model.encoder.embed_tokens.weight"
+        | "model.decoder.embed_tokens.weight" => JA_ZH_ALIAS_TARGET,
+        _ => name,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remap_ja_zh_tensor_name;
+
+    #[test]
+    fn ja_zh_aliases_map_to_lm_head() {
+        assert_eq!(
+            remap_ja_zh_tensor_name("model.shared.weight"),
+            "lm_head.weight"
+        );
+        assert_eq!(
+            remap_ja_zh_tensor_name("model.encoder.embed_tokens.weight"),
+            "lm_head.weight"
+        );
+        assert_eq!(
+            remap_ja_zh_tensor_name("model.decoder.embed_tokens.weight"),
+            "lm_head.weight"
+        );
+    }
+
+    #[test]
+    fn unrelated_tensor_names_remain_unchanged() {
+        assert_eq!(
+            remap_ja_zh_tensor_name("model.encoder.layers.0.fc1.weight"),
+            "model.encoder.layers.0.fc1.weight"
+        );
     }
 }
