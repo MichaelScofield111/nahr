@@ -160,7 +160,7 @@ impl MarianTranslator {
                 .to_vec();
             tokens.push(self.config.eos_token_id);
             let tokens = Tensor::new(tokens.as_slice(), &self.device)?.unsqueeze(0)?;
-            model.encoder().forward(&tokens, 0)?
+            self.model.encoder().forward(&tokens, 0)?
         };
 
         let mut token_ids = vec![self.config.decoder_start_token_id];
@@ -168,7 +168,7 @@ impl MarianTranslator {
             let context_size = if index >= 1 { 1 } else { token_ids.len() };
             let start_pos = token_ids.len().saturating_sub(context_size);
             let input_ids = Tensor::new(&token_ids[start_pos..], &self.device)?.unsqueeze(0)?;
-            let logits = model.decode(&input_ids, &encoder_xs, start_pos)?;
+            let logits = self.model.decode(&input_ids, &encoder_xs, start_pos)?;
             let logits = logits.squeeze(0)?;
             let logits = logits.get(logits.dim(0)? - 1)?;
             let token = logits_processor.sample(&logits)?;
