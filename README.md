@@ -2,167 +2,164 @@
   <img src="assets/nahr-logo-black.png" alt="nahr logo" width="260">
 </p>
 
-<h1 align="center">𝓷𝓪𝓱𝓻</h1>
+<h1 align="center">nahr</h1>
 
 <p align="center">
-  A Rust CLI for transcribing video, translating subtitles into Simplified Chinese, and burning them into a new MP4.
+  A Rust CLI that extracts speech from an MP4, generates Chinese subtitles, and burns them back into a new video.
 </p>
 
-> [!WARNING]
-> Here be dragons! As I plan to ship a torrent of features in the following months, future updates **will** contain **breaking changes**.
+## Overview
 
-## What This Project Does
+`nahr` is a local-first subtitle pipeline for videos with speech.
 
-Given one input MP4, the pipeline does:
+Given one input MP4, the current version does this:
 
-1. Extract audio to WAV (`16kHz`, `mono`, `16-bit PCM`)
-2. Run VAD + Whisper to generate source subtitles (`.<lang>.srt`)
-3. Translate subtitles to Simplified Chinese (`.cn.srt`)
-4. Burn Chinese subtitles into a new MP4
-5. Remove temporary WAV/SRT files unless `--keep-temp` is enabled
+1. Extract the audio stream to `16kHz` mono WAV
+2. Run VAD + Whisper to segment and transcribe speech
+3. Translate subtitles into Simplified Chinese
+4. Burn the Chinese subtitles into a new MP4 with `ffmpeg`
 
-Output video name:
+This version is centered on a single command and a minimal setup. The translation path is now implemented in Rust, so the old Python runtime steps are no longer required for normal usage.
 
-- `<input_stem>_cn_bake.mp4`
+## Current Capabilities
+
+- Input: one local `.mp4` file
+- Source languages: `en`, `ja`
+- Output subtitles: Simplified Chinese
+- Output video suffix: `_cn_bake.mp4`
+- Runtime style: local CLI, model-assisted, `ffmpeg`-based burn-in
 
 ## Requirements
 
 - Rust toolchain
-- Python 3.9+
-- `ffmpeg` executable
-- FFmpeg built with `libass` (required by `subtitles` filter)
+- `ffmpeg`
+- `ffmpeg` built with subtitle filter support (`libass`)
+- Internet access on first run for Hugging Face model/tokenizer downloads used by translation
 
-Verify FFmpeg:
+Check your FFmpeg build:
 
 ```bash
 ffmpeg -version
 ffmpeg -filters | grep subtitles
 ```
 
-## Quick Start
+## Models
 
-### 1) Clone
+`nahr` currently expects these local Whisper/VAD model files:
 
-```bash
-git clone https://github.com/MichaelScofield111/nahr.git
-cd nahr
-```
+- `models/ggml-base.bin`
+- `models/ggml-silero-v5.1.2.bin`
 
-### 2) Download models
+Download them:
 
 ```bash
 mkdir -p models
 
-# Whisper model (default path used by CLI)
 curl -L "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" \
   -o models/ggml-base.bin
 
-# VAD model (default path used by CLI)
 curl -L "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin" \
   -o models/ggml-silero-v5.1.2.bin
 ```
 
-### 3) Build
+The translation model weights and tokenizer files are fetched automatically on first use and cached by `hf-hub`.
 
-Install Python translation dependencies:
-
-```bash
-cd script
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install torch transformers srt
-cd ..
-```
-
-Then build Rust:
+## Build
 
 ```bash
 cargo build --release
 ```
 
-### 4) Run
+## Usage
+
+Basic usage:
+
+```bash
+cargo run --release -- --file assets/example.mp4
+```
+
+Specify the source language explicitly:
 
 ```bash
 cargo run --release -- \
-  --input-file assets/example.mp4 \
-  --language en
+  --file assets/example-ja.mp4 \
+  --language ja
 ```
 
-Or even shorter, since English is already the default:
+Command help:
 
 ```bash
-cargo run --release -- --input-file assets/example.mp4
+cargo run -- --help
 ```
 
-If you want to keep temporary `.wav/.srt` files:
+Current CLI:
 
-```bash
-cargo run --release -- \
-  --input-file assets/example.mp4 \
-  --language en \
-  --whisper-model-path models/ggml-base.bin \
-  --vad-model-path models/ggml-silero-v5.1.2.bin \
-  --keep-temp
-```
+- `-f, --file <FILE>`: input MP4 file
+- `-l, --language <LANG>`: source language, default `en`
+- `--keep-temp`: currently accepted by the CLI, but the pipeline already leaves intermediate files in place, so this flag does not materially change behavior in this version
 
-## CLI Arguments
+## Output Files
 
-- `--input-file <FILE>`: Input MP4 file (required)
-- `--language <LANG>`: Source language (`en` default, translation supports `en` and `ja`)
-- `--keep-temp`: Keep intermediate WAV/SRT files
-
-Advanced options still exist for custom setups, but the default workflow does not require passing model/script paths explicitly.
-
-## Intermediate Files
-
-For input `demo.mp4` with `--language en`, temporary files are:
+For an input file like `demo.mp4`, the current pipeline produces:
 
 - `demo.wav`
-- `demo.en.srt`
-- `demo.en.cn.srt`
+- `demo.cn.srt`
+- `demo_cn_bake.mp4`
+
+At the moment, intermediate files are not automatically cleaned up.
+
+## Example Assets
+
+The repository includes sample assets you can use for quick validation:
+
+- `assets/example.mp4`
+- `assets/example-ja.mp4`
+- `assets/example-ja.wav`
+- `assets/example-ja.cn.srt`
+- `assets/example-ja_cn_bake.mp4`
 
 ## Troubleshooting
 
 ### `failed to extract wav ... Stream not found`
 
-Reason: your input video has no audio stream.
+Your input video likely has no audio stream.
 
-Check streams:
+Check it with:
 
 ```bash
 ffprobe -v error -show_entries stream=index,codec_type,codec_name -of compact input.mp4
 ```
 
-You need an MP4 that contains at least one audio stream.
+### `failed to load whisper model` or `failed to load vad model`
 
-### VAD / Whisper model load failure
+Check that:
 
-Check:
+- the files exist under `models/`
+- the filenames match the defaults above, or you pass your own model paths in code/custom builds
+- the files are readable
 
-- File exists and is readable
-- `--whisper-model-path` points to a Whisper GGML model (for example `ggml-base.bin`)
-- `--vad-model-path` points to a VAD model (for example `ggml-silero-v5.1.2.bin`)
+### `audio extraction succeeded ..., but VAD detected no speech segments`
+
+This usually means the file has little or no detectable speech, or the VAD thresholds are too strict for that audio.
 
 ### `ffmpeg failed to burn subtitles`
 
-Possible reasons:
+Common causes:
 
-- FFmpeg missing
-- FFmpeg without `libass`
-- Subtitle path escaping/permissions issue
+- `ffmpeg` is not installed
+- your FFmpeg build does not support subtitle burn-in
+- the subtitle file path cannot be resolved correctly by FFmpeg
 
-### Translator script failed
+### First run is slow
 
-Check:
+That is expected. The translation side downloads model/tokenizer artifacts on first use and caches them locally for later runs.
 
-- `python3` is available, or pass `--python-bin <path>`
-- `script/trans.py` exists, or pass `--translator-script-path <path>`
-- Python dependencies are installed
-- The translation model can be downloaded or already exists in local cache
+## Development Notes
 
-## Notes
+- The `script/` directory is now a support utility area, mainly for tokenizer conversion, not a required runtime path for the main CLI.
+- `cargo test` currently passes for the repository's unit tests.
+- The current crate version in `Cargo.toml` is `0.1.0`, while the CLI help text reports version `1.0`; if you plan to publish releases, that metadata is worth aligning separately.
 
-- `models/` is ignored by git; do not commit model binaries.
-- First translation run may download model assets required by `transformers`.
-- Keep original input videos as backup; burn-in rewrites output video.
+## License
+
+[LICENSE](LICENSE)
